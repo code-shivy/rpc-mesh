@@ -5,29 +5,24 @@
 - Prometheus metrics export
 - Support for Devnet/Testnet/Mainnet
 
+## 📁 Repo Structure
 
-## Github Repo Structure
+```
 rpc-mesh/
-├── main.go
-├── go.mod
-├── go.sum
+├── main.go                      # Entry point
+├── go.mod / go.sum              # Dependencies
 ├── router/
-│   ├── load_balancer.go
-│   ├── health_check.go
-│   └── types.go
+│   ├── load_balancer.go         # Core routing logic
+│   ├── health_check.go          # Endpoint health monitoring
+│   └── types.go                 # Data structures
 ├── metrics/
-│   ├── prometheus.go
-│   └── collector.go
+│   └── prometheus.go            # Metrics collection
 ├── config/
-│   └── config.go
+│   └── config.go                # Configuration
 ├── tests/
-│   ├── load_balancer_test.go
-│   └── health_check_test.go
-├── Dockerfile
-├── docker-compose.yml
-├── .gitignore
-├── README.md
-├── Makefile
-└── docs/
-├── ARCHITECTURE.md
-└── DEPLOYMENT.md
+│   └── *_test.go                # Unit tests
+├── Dockerfile                   # Container image
+├── docker-compose.yml           # Local dev environment
+├── Makefile                     # Build commands
+└── README.md                    # This file
+```
