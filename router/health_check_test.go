@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/shubham-astro/rpc-mesh/config"
 )
 
 func newTestChecker(t *testing.T, pool *Pool, probe ProbeFunc) *HealthChecker {
