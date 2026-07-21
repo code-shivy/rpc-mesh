@@ -273,15 +273,17 @@ them is a common and expensive mistake.
 
 ```
 rpc-mesh/
-├── main.go                       # Entry point: config, pool, health checker, HTTP server
+├── main.go               # Entry point: config, pool, health checker, HTTP server
 ├── go.mod / go.sum
 ├── router/
-│   ├── types.go                  # Endpoint, Pool, selection logic
-│   ├── health_check.go           # Parallel probing, hysteresis, EWMA
-│   ├── pool_test.go
-│   └── health_check_test.go
+│ ├── types.go            # Endpoint, Pool, selection logic
+│ ├── health_check.go     # Parallel probing, hysteresis, EWMA
+│ ├── proxy.go            # JSON-RPC forwarding, retry policy, CORS
+│ ├── pool_test.go
+│ ├── health_check_test.go
+│ └── proxy_test.go
 ├── config/
-│   └── config.go                 # Env parsing and startup validation
+│ └── config.go            # Env parsing and startup validation
 └── README.md
 ```
 
