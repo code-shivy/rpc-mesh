@@ -18,6 +18,7 @@ type EndpointConfig struct {
 
 type Config struct {
 	Port            string
+	CORSAllowOrigin string
 	Endpoints       []EndpointConfig
 	HealthInterval  time.Duration
 	HealthTimeout   time.Duration
@@ -37,7 +38,10 @@ func Load() (Config, error) {
 		}
 	}
 
-	cfg := Config{Port: getEnvString("PORT", "8080")}
+	cfg := Config{
+		Port:            getEnvString("PORT", "8080"),
+		CORSAllowOrigin: getEnvString("CORS_ALLOW_ORIGIN", "*"),
+	}
 
 	var err error
 	cfg.HealthInterval, err = getEnvDuration("HEALTH_INTERVAL", 5*time.Second)
@@ -150,6 +154,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxBodyBytes < 1024 {
 		errs = append(errs, errors.New("MAX_BODY_BYTES must be >= 1024"))
+	}
+	if c.CORSAllowOrigin == "" {
+		errs = append(errs, errors.New("CORS_ALLOW_ORIGIN must not be empty (use * to allow all)"))
 	}
 	return errors.Join(errs...)
 }

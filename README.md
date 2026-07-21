@@ -188,6 +188,7 @@ startup, not at request time.
 | `FAIL_THRESHOLD` | `3` | Consecutive failures before ejection |
 | `OK_THRESHOLD` | `2` | Consecutive successes before readmission |
 | `MAX_BODY_BYTES` | `5242880` | Max request body size |
+| `CORS_ALLOW_ORIGIN` | * | Allowed browser origin. Narrow this when fronting an API-keyed upstream. |
 
 Durations use Go syntax: `5s`, `250ms`, `1m30s`.
 

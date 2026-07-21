@@ -41,6 +41,9 @@ func main() {
 		defer close(hcDone)
 		hc.Run(ctx)
 	}()
+	
+	proxy := router.NewProxy(pool, cfg.UpstreamTimeout, cfg.MaxBodyBytes)
+	proxy.SetAllowOrigin(cfg.CORSAllowOrigin)
 
 	mux := http.NewServeMux()
 
@@ -51,6 +54,8 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
 	})
+
+	mux.Handle("/", proxy)
 
 	// "Should a load balancer send us traffic?" With no healthy endpoint we
 	// can serve nothing useful, so we shed traffic without dying.
