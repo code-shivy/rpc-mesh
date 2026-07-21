@@ -4,8 +4,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/shubham-astro/rpc-mesh/config"
 )
 
 func testPool(t *testing.T, eps ...*Endpoint) *Pool {
