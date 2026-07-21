@@ -16,9 +16,9 @@ RPC_URL=http://localhost:8080
 
 No SDK changes. web3.js, Anchor, and solana-go all keep working.
 
-> **Status: work in progress.** Health checking and endpoint selection are
-> implemented and tested. The proxy hot path, Prometheus metrics, and
-> deployment are in progress — see [Roadmap](#roadmap).
+> **Status: work in progress.** Health checking, endpoint selection, and the
+> JSON-RPC proxy are implemented and tested — `solana --url http://localhost:8080 slot`
+> works today. Prometheus metrics and deployment are next.
 
 ---
 
