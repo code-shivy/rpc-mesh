@@ -293,7 +293,7 @@ rpc-mesh/
 - [x] Endpoint pool with slot-lag-aware selection
 - [x] Parallel health checker with hysteresis and EWMA
 - [x] Graceful shutdown
-- [ ] JSON-RPC proxy with method-aware routing and retry
+- [x] JSON-RPC proxy with method-aware routing and retry
 - [ ] Prometheus metrics and Grafana dashboard
 - [ ] Benchmark harness with p50/p95/p99 comparison
 - [ ] Docker + docker-compose
