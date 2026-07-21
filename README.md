@@ -210,7 +210,8 @@ upstream slowness.
 | `GET` | `/health` | Liveness. Always 200 while the process runs. |
 | `GET` | `/ready` | Readiness. 503 when no endpoint is usable. |
 | `GET` | `/status` | Per-endpoint health, slot, slot lag, EWMA latency. |
-| `POST` | `/` | JSON-RPC proxy *(in progress)* |
+| `POST` | `/` | JSON-RPC proxy. Forwards to the selected endpoint. |
+| `OPTIONS` | `/` | CORS preflight. |
 | `GET` | `/metrics` | Prometheus metrics *(in progress)* |
 
 ---
