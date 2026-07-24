@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shubham-astro/rpc-mesh/config"
-	"github.com/shubham-astro/rpc-mesh/router"
+	"github.com/code-shivy/rpc-mesh/config"
+	"github.com/code-shivy/rpc-mesh/router"
 )
 
 func main() {
