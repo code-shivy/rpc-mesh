@@ -592,7 +592,3 @@ ships and are reproducible by anyone who clones the repo.
 - [ ] Docker + docker-compose
 - [ ] Method-aware routing (expensive calls to a paid tier, cheap reads to free ones)
 - [ ] Multi-region deployment
-
-## License
-
-MIT
