@@ -21,10 +21,19 @@ Solana CLI does too:
 solana --url http://localhost:8080 epoch-info
 ```
 
+Against a reproducible local pool, rpc-mesh cuts p50 latency by **45%** versus a
+randomly chosen endpoint and mean latency by **31%** versus the best endpoint
+that could serve the load alone — at 100% availability, where the fastest
+endpoint on its own manages 13%.
+
+```bash
+go run ./cmd/bench -local -n 400 -c 10   # ~15 seconds, no network required
+```
+
 > **Status: work in progress.** Config, health checking, endpoint selection, the
-> JSON-RPC proxy, and Prometheus metrics are implemented and tested. Benchmark
-> numbers, Docker packaging, and deployment are in progress — see
-> [Roadmap](#roadmap).
+> JSON-RPC proxy, Prometheus metrics, and the benchmark harness are implemented
+> and tested. A request-path circuit breaker, Docker packaging, and deployment
+> are next — see [Roadmap](#roadmap).
 
 ---
 
@@ -35,8 +44,8 @@ know is that **a Solana RPC node can be fast and wrong.**
 
 RPC nodes drift behind the cluster head. A node that's 500 slots behind still
 answers in 20ms — with stale account state. To nginx it looks like the best
-endpoint in the pool. To your users it looks like a balance that hasn't
-updated, or a transaction that "didn't land."
+endpoint in the pool. To your users it looks like a balance that hasn't updated,
+or a transaction that "didn't land."
 
 rpc-mesh tracks each endpoint's current slot, computes its lag against the
 highest slot observed across the pool, and excludes anything beyond a
@@ -52,7 +61,126 @@ simultaneously, routinely disagree about the current head of the chain:
 ```
 
 One slot is roughly 400ms of drift — noise at that magnitude, but the mechanism
-is identical when an endpoint falls 200 slots behind under load.
+is identical when an endpoint falls 500 slots behind.
+
+---
+
+## Benchmarks
+
+### Reproducible: `-local`
+
+`cmd/bench -local` starts synthetic upstreams and an in-process rpc-mesh — the
+real pool, health checker, and proxy — then benchmarks each target through
+identical HTTP transports. No network, no rate-limit penalty box, same numbers
+on any machine.
+
+```
+target                     p50      p95      p99     mean    ok%    lag
+------------------------------------------------------------------------
+fast-limited              34.9     35.9     36.4     33.9    13%!     0
+steady                   130.5    140.6    141.1    131.0   100%      1
+slow                     317.8    339.0    340.2    320.3   100%      0
+stale                     41.1     42.0     44.4     41.1   100%    501
+rpc-mesh                 124.0    139.7    142.3     90.0   100%      1
+```
+
+Every row is doing work:
+
+- **`fast-limited`** is the quickest thing in the pool and can serve 13% of the
+  load. Hardcode it and you get a fast client that fails six times in seven.
+- **`steady`** is the best endpoint you could actually point everything at.
+- **`slow`** is the cost of a bad hardcoded choice.
+- **`stale`** is fast, 100% available, never rate limited — and **501 slots
+  behind**. A latency-only load balancer routes everything here. rpc-mesh sends
+  it nothing.
+- **`rpc-mesh`** drains fast-limited's capacity, absorbs the overflow on steady,
+  and skips stale entirely.
+
+The interesting column is `mean`, not `p50`. rpc-mesh's mean (90.0ms) sits well
+below its p50 (124.0ms) — a bimodal distribution, roughly 43% of requests served
+at ~34ms and the rest at ~131ms. Every other target is unimodal, mean ≈ p50. That
+gap *is* the blend.
+
+| Claim | Result |
+|---|---|
+| p50 vs. a randomly chosen endpoint | **−44.7%** |
+| Mean vs. the best fully-available endpoint | **−31.3%** |
+| Availability vs. the fastest endpoint | **100% vs. 13%** |
+
+**On beating the fastest endpoint.** A proxy adds a hop, so it cannot beat an
+endpoint that could serve the entire load by itself. It *can* beat a fast
+endpoint that rate limits, because it drains that capacity and puts the overflow
+somewhere reliable — no single endpoint does both. The harness reports the
+comparison against the fastest *fully-available* target for exactly this reason,
+and excludes anything under 90% success or over 50 slots of lag.
+
+### Real world: public endpoints under load
+
+Concurrency 10 against three free public providers:
+
+```
+target                                p50      p95      p99    ok%    errs
+--------------------------------------------------------------------------
+api.mainnet-beta.solana.com         206.8    228.0    240.1     5%     284
+solana-rpc.publicnode.com           274.3    338.0    352.0   100%       0
+solana.leorpc.com                   214.1    260.7    312.6     7%     280
+rpc-mesh                            194.4    362.0    430.3    82%      55
+```
+
+**Read `ok%` before the latency columns.** mainnet-beta's excellent-looking
+206ms p50 comes from 16 surviving requests out of 300 — survivorship bias, since
+rate-limited requests never contribute a latency sample. It is also genuinely
+3.4x faster than publicnode when it answers, which is precisely the tension
+`-local` reproduces.
+
+A developer hardcoding one of these gets 37% of requests answered on average.
+Through rpc-mesh: 82%. The honest counterweight is p99, which is **worse** —
+430ms against 301ms — because retrying costs a round trip.
+
+Note how differently that lands locally, where mesh's max (144ms) came in *below*
+steady's (142ms) despite dozens of retries. **Fast failures are nearly free to
+retry; slow failures are not.** A 429 returns in under a millisecond, so the
+retry costs one extra RTT. A timeout costs the full deadline before the second
+attempt even starts. Retry cost is proportional to how long the first attempt
+took to fail.
+
+### Known limitation the benchmark exposed
+
+**The health checker is blind to rate limiting.** It probes each endpoint once
+per `HEALTH_INTERVAL` — nowhere near any provider's limit — so every probe
+succeeds and every endpoint stays `healthy: true`, while the proxy is
+simultaneously collecting 429s under load:
+
+```
+retrying getSlot: fast-limited -> steady (rate_limited)
+retrying getSlot: fast-limited -> steady (rate_limited)
+retrying getSlot: fast-limited -> steady (rate_limited)
+```
+
+The control plane cannot see the failure mode that matters most, and the data
+plane already knows — `classifyError` labels these `rate_limited` and the
+information is discarded. Retry is currently masking a routing decision, and
+paying for it in tail latency. A circuit breaker on the request path is the next
+thing to build.
+
+### Methodology
+
+Every target is measured through the same `http.Transport` settings the proxy
+uses. Benchmarking upstreams with Go's default `MaxIdleConnsPerHost: 2` while
+rpc-mesh uses 100 would measure connection pooling rather than routing. Warmup
+requests are discarded so nobody is charged for DNS, TCP, and TLS setup.
+
+Slot lag is sampled in a **separate simultaneous pass** after the latency runs.
+It cannot be derived from them: targets are benchmarked sequentially, so one
+measured 30 seconds earlier reports a slot ~75 lower purely because the chain
+moved on. That skew is a property of measurement order, not of the endpoint, and
+it is large enough to disqualify healthy targets.
+
+Load is closed-loop — each worker waits for a response before issuing the next.
+This understates tail latency, since offered load drops when the server slows and
+the worst moments are under-sampled ("coordinated omission"). Every target is
+measured identically, so the comparison holds even though absolute numbers are
+optimistic.
 
 ### The public endpoint landscape
 
@@ -83,13 +211,13 @@ is a common and expensive mistake.
 | `GET /ready` | Should traffic be sent here? | **Yes** | Traffic sent into a black hole |
 
 If every upstream RPC provider is down, `/ready` returns `503` and the load
-balancer stops sending traffic. `/health` still returns `200`, because
-restarting rpc-mesh would not bring Solana's RPC providers back — it would just
-add churn and lose warm connection pools during an incident.
+balancer stops sending traffic. `/health` still returns `200`, because restarting
+rpc-mesh would not bring Solana's RPC providers back — it would just add churn
+and lose warm connection pools during an incident.
 
 Kubernetes wires these to `livenessProbe` and `readinessProbe` respectively.
-Pointing a liveness probe at a dependency-aware endpoint is how a single
-upstream outage turns into a cluster-wide crash loop.
+Pointing a liveness probe at a dependency-aware endpoint is how a single upstream
+outage turns into a cluster-wide crash loop.
 
 ---
 
@@ -120,10 +248,10 @@ Selection, in order:
 winner-take-all: one endpoint absorbs 100% of traffic until its measured latency
 rises above the runner-up's. On a pool of free-tier providers that means hitting
 one endpoint's rate limit while the others idle — and it leaves the unused
-endpoints' latency data low-resolution, since only health probes ever refresh
-it. P2C keeps tail latency close to always-pick-the-fastest while spreading
-load. Note it only does useful work at three or more candidates; with two, both
-are always sampled and the comparison is unconditional.
+endpoints' latency data low-resolution, since only health probes ever refresh it.
+P2C keeps tail latency close to always-pick-the-fastest while spreading load.
+Note it only does useful work at three or more candidates; with two, both are
+always sampled and the comparison is unconditional.
 
 **Near-equal latencies count as tied.** Probe RTT is noisy — two sequential RPC
 calls, smoothed but not precise. A 20% measured gap that is really jitter should
@@ -138,6 +266,13 @@ decay back to baseline:
 ```
 337ms → 450ms → 426ms → 407ms → 391ms → 379ms → 369ms
 ```
+
+**Probes use a tuned transport.** solana-go defaults to `http.DefaultTransport`
+and its two idle connections per host, so probes intermittently paid a fresh TLS
+handshake and that cost landed in the latency used for routing. The measured gap
+between two endpoints was decaying monotonically across every sample — the signal
+was tracking connection warmup, not endpoint speed. With a tuned transport the
+same measurement is flat within ±2ms.
 
 **Unprobed ≠ instant.** An endpoint with no latency samples is treated as
 `maxDuration`, not `0`. Otherwise every unprobed endpoint would beat every
@@ -154,16 +289,16 @@ serves from the best available one and flags it rather than returning an error.
 For most read methods availability beats freshness — but the caller is told, via
 `X-RPC-Mesh-Degraded` and a counter, so it can be alerted on.
 
-**Dead nodes don't set the watermark.** `maxSlot` is computed only from
-endpoints that are healthy and responded successfully. A node that died while
-running ahead of the pool would otherwise freeze the watermark permanently and
-make every live endpoint look like it was lagging.
+**Dead nodes don't set the watermark.** `maxSlot` is computed only from endpoints
+that are healthy and responded successfully. A node that died while running ahead
+of the pool would otherwise freeze the watermark permanently and make every live
+endpoint look like it was lagging.
 
-**Never-probed endpoints report zero lag.** An endpoint that has never reported
-a slot would otherwise show a lag of the entire chain height (~434,000,000).
-That is not a lag, it is the absence of a measurement — and as a Prometheus
-series it destroys the y-axis of any dashboard graphing lag across endpoints.
-The right signal for a dead endpoint is `rpcmesh_endpoint_healthy`.
+**Never-probed endpoints report zero lag.** An endpoint that has never reported a
+slot would otherwise show a lag of the entire chain height (~434,000,000). That
+is not a lag, it is the absence of a measurement — and as a Prometheus series it
+destroys the y-axis of any dashboard graphing lag across endpoints. The right
+signal for a dead endpoint is `rpcmesh_endpoint_healthy`.
 
 **Optimistic start.** Endpoints begin healthy. Starting pessimistic would mean
 serving 503s for a full health interval after every deploy.
@@ -174,20 +309,20 @@ serving 503s for a full health interval after every deploy.
 
 **Writes are never retried.** A timeout on `sendTransaction` is ambiguous — the
 transaction may already be in a leader's queue. Retrying risks a double-send,
-which for a non-idempotent program means real financial loss. Reads retry once
-on a different endpoint; `sendTransaction`, `requestAirdrop`, and batches (which
-may contain a write) fail fast and let the client, which knows the signature and
-can poll for it, decide.
+which for a non-idempotent program means real financial loss. Reads retry once on
+a different endpoint; `sendTransaction`, `requestAirdrop`, and batches (which may
+contain a write) fail fast and let the client, which knows the signature and can
+poll for it, decide.
 
 **The request body is peeked, not parsed.** Routing needs the `method` field and
-nothing else. `encoding/json` decodes into a two-field struct and ignores the
+nothing else. `encoding/json` decodes into a one-field struct and ignores the
 rest, so a 2MB request costs no more than a small one — and nothing breaks when
 Solana adds a field.
 
-**Connection reuse is most of the latency win.** Go's default transport keeps
-two idle connections per host. Under any concurrency you exceed that constantly
-and pay a fresh TCP and TLS handshake — 100–200ms to a distant node, on a
-request whose real work is 20ms. `MaxIdleConnsPerHost` is set to 100.
+**Connection reuse is most of the latency win.** Go's default transport keeps two
+idle connections per host. Under any concurrency you exceed that constantly and
+pay a fresh TCP and TLS handshake — 100–200ms to a distant node, on a request
+whose real work is 20ms. `MaxIdleConnsPerHost` is set to 100.
 
 **JSON-RPC errors inside HTTP 200 are counted.** JSON-RPC signals application
 failures in the body, so status code alone tells you nothing:
@@ -200,9 +335,9 @@ HTTP/1.1 200 OK
 
 Without inspecting the body, a dashboard would show 100% success while every
 client call fails. rpc-mesh buffers the first 4KB of each response, extracts any
-error code into `rpcmesh_rpc_errors_total`, and streams the rest untouched.
-Larger responses skip parsing entirely — a 30MB `getProgramAccounts` result is a
-success, not an error object.
+error code into `rpcmesh_rpc_errors_total`, and streams the rest untouched. Larger
+responses skip parsing entirely — a 30MB `getProgramAccounts` result is a success,
+not an error object.
 
 **Upstream-scoped headers are stripped.** `Alt-Svc` would advertise HTTP/3 on a
 port rpc-mesh doesn't serve. Upstream CORS headers describe the upstream's
@@ -229,9 +364,9 @@ returns values rather than pointers for the same reason: handing out
 `[]*Endpoint` would let callers read mutable fields with no lock held, a data
 race that looks completely innocent at the call site.
 
-One pool-level mutex rather than one per endpoint: per-endpoint locks would
-still need a pool-level lock to compute `maxSlot` consistently, which means two
-lock levels and a lock-ordering hazard. Known contention point; will revisit if
+One pool-level mutex rather than one per endpoint: per-endpoint locks would still
+need a pool-level lock to compute `maxSlot` consistently, which means two lock
+levels and a lock-ordering hazard. Known contention point; will revisit if
 profiling justifies it.
 
 `go test -race ./...` runs on every commit.
@@ -281,40 +416,19 @@ no traffic thereafter:
 }
 ```
 
----
-
-## Benchmarking
+### Run the benchmark
 
 ```bash
-# terminal 1
-RPC_ENDPOINTS="https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com" go run .
+# deterministic, no network, no server needed
+go run ./cmd/bench -local -n 400 -c 10
 
-# terminal 2 — wait ~30s for EWMAs to converge first
+# against real providers (start rpc-mesh first, wait ~30s for EWMAs to converge)
 go run ./cmd/bench \
   -endpoints "https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com" \
   -n 300 -c 10
 ```
 
-`cmd/bench` measures each upstream individually and then rpc-mesh, through
-identically configured HTTP transports, and reports p50/p95/p99 for each.
-
-**rpc-mesh cannot beat the fastest endpoint** — it adds a network hop, so that
-comparison should come out slightly negative. Any benchmark showing otherwise
-has a bug, most likely mismatched transport settings between the baseline and
-the proxy.
-
-The meaningful comparison is against a *randomly chosen* endpoint, which is what
-a developer gets by hardcoding one provider without knowing which is fastest.
-The other two wins are tail latency — routing away from an endpoint having a bad
-minute within one health cycle — and availability, where an endpoint returning
-errors for 100% of requests contributes 0% through the mesh.
-
-Load is closed-loop (each worker waits for a response before issuing the next),
-which understates tail latency under load — "coordinated omission." Every target
-is measured identically, so the comparison holds even though absolute numbers
-are optimistic.
-
-*Numbers to be published once the harness has run against a stable pool.*
+`-markdown` emits a table ready to paste into a README.
 
 ---
 
@@ -390,15 +504,15 @@ Response headers on proxied requests:
 
 **Method labels are allowlisted.** The method name comes from the request body,
 which is attacker-controlled — without an allowlist, a loop posting
-`{"method":"random-string-N"}` mints a new time series per request until the
-TSDB falls over. Unrecognized methods collapse to `other`. The same applies to
+`{"method":"random-string-N"}` mints a new time series per request until the TSDB
+falls over. Unrecognized methods collapse to `other`. The same applies to
 JSON-RPC error codes, since providers invent their own (drpc's `code 35` is not
 in any spec).
 
-**Endpoint gauges are computed at scrape time** via a custom `prometheus.Collector`
-reading `pool.Snapshot()`, rather than pushed by the health checker. There's no
-second copy of the state to keep in sync, and the values are current by
-construction.
+**Endpoint gauges are computed at scrape time** via a custom
+`prometheus.Collector` reading `pool.Snapshot()`, rather than pushed by the
+health checker. There's no second copy of the state to keep in sync, and the
+values are current by construction.
 
 ---
 
@@ -422,7 +536,9 @@ rpc-mesh/
 │   └── config.go                 # Env parsing and startup validation
 ├── cmd/
 │   └── bench/
-│       └── main.go               # p50/p95/p99 harness: each endpoint vs. the mesh
+│       ├── main.go               # Harness: latency, success rate, slot lag
+│       ├── local.go              # Synthetic upstreams + in-process rpc-mesh
+│       └── context.go
 └── README.md
 ```
 
@@ -444,6 +560,7 @@ Planned, not yet present: `Dockerfile`, `docker-compose.yml`,
 ```bash
 go vet ./...
 go test -race ./...
+go run ./cmd/bench -local -n 400 -c 10
 ```
 
 Tests inject a `ProbeFunc` rather than hitting the network, so slot lag,
@@ -451,6 +568,10 @@ timeouts, ejection, and recovery are covered deterministically with no external
 dependencies. Concurrency behavior — parallel fan-out, deadline enforcement,
 clean shutdown on context cancellation — is tested directly, and the race
 detector is the correctness proof for the shared pool.
+
+`-local` runs the real pool, health checker, and proxy against synthetic
+upstreams in-process, so the benchmark numbers describe the routing logic that
+ships and are reproducible by anyone who clones the repo.
 
 ---
 
@@ -463,10 +584,15 @@ detector is the correctness proof for the shared pool.
 - [x] JSON-RPC proxy with retry-on-read, no-retry-on-write
 - [x] Power-of-two-choices routing with a near-tie band
 - [x] Prometheus metrics with bounded label cardinality
-- [x] Benchmark harness
-- [ ] Published benchmark numbers
+- [x] Benchmark harness with success rate, slot lag, and a deterministic local mode
+- [ ] **Request-path circuit breaker** — the health checker cannot see rate limiting, because it probes far below any provider's limit. Feeding proxy outcomes back into endpoint health replaces per-request retries with one routing decision
+- [ ] **Failure-aware retry budget** — retrying a 429 costs one RTT; retrying a timeout costs the full deadline. Retry policy should depend on how the first attempt failed
+- [ ] Quota-aware routing — providers return `X-Ratelimit-*` headers on every response; routing away from an endpoint before it starts refusing you is free information currently thrown away
 - [ ] Grafana dashboard, provisioned
 - [ ] Docker + docker-compose
-- [ ] Quota-aware routing — providers return `X-Ratelimit-*` headers on every response; routing away from an endpoint before it starts refusing you is free information currently thrown away
 - [ ] Method-aware routing (expensive calls to a paid tier, cheap reads to free ones)
 - [ ] Multi-region deployment
+
+## License
+
+MIT
