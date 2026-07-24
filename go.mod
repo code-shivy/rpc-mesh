@@ -1,4 +1,4 @@
-module github.com/shubham-astro/rpc-mesh
+module github.com/code-shivy/rpc-mesh
 
 go 1.24.1
 
