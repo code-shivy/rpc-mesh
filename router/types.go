@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shubham-astro/rpc-mesh/config"
+	"github.com/code-shivy/rpc-mesh/config"
 )
 
 var (
